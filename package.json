@@ -1,0 +1,39 @@
+{
+  "name": "school-results-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "emulators": "firebase emulators:start",
+    "deploy:rules": "firebase deploy --only firestore,storage",
+    "deploy:functions": "cd functions && npm install && npm run build && cd .. && firebase deploy --only functions",
+    "test": "tsx --tsconfig tsconfig.json tests/grading.test.ts"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "firebase": "^11.1.0",
+    "lucide-react": "^0.469.0",
+    "next": "^15.1.0",
+    "papaparse": "^5.4.1",
+    "qrcode.react": "^4.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^2.15.0",
+    "tailwind-merge": "^2.5.5",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/papaparse": "^5.3.15",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

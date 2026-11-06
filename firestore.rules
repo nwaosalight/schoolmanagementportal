@@ -1,0 +1,186 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() { return request.auth != null; }
+    function userPath() { return /databases/$(database)/documents/users/$(request.auth.uid); }
+    function hasProfile() { return signedIn() && exists(userPath()); }
+    function me() { return get(userPath()).data; }
+    function active() { return hasProfile() && me().status == 'ACTIVE'; }
+    function inSchool(s) { return active() && me().schoolId == s; }
+    function hasRole(r) { return r in me().roles; }
+    function isAdmin(s) { return inSchool(s) && (hasRole('school_admin') || hasRole('exam_officer')); }
+    function isReviewer(s) { return inSchool(s) && (hasRole('principal') || hasRole('hod')); }
+    function isStaff(s) {
+      return inSchool(s) && (hasRole('school_admin') || hasRole('exam_officer') ||
+             hasRole('principal') || hasRole('hod') || hasRole('teacher'));
+    }
+    function isPlatform() { return active() && me().get('isPlatformAdmin', false) == true; }
+    function sch(s) { return /databases/$(database)/documents/schools/$(s); }
+
+    // ---------- users ----------
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isPlatform() || isStaff(resource.data.schoolId));
+
+      allow create: if signedIn() && (
+        // self-registration of a brand-new school (school doc created in the same batch)
+        ( request.auth.uid == uid
+          && !exists(userPath())
+          && request.resource.data.roles == ['school_admin']
+          && request.resource.data.get('isPlatformAdmin', false) == false
+          && !exists(sch(request.resource.data.schoolId))
+          && getAfter(sch(request.resource.data.schoolId)).data.ownerUid == uid )
+        // school admin creating an account inside their school
+        || ( isAdmin(request.resource.data.schoolId)
+             && request.resource.data.get('isPlatformAdmin', false) == false )
+      );
+
+      allow update: if signedIn() && (
+        ( request.auth.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['mustChangePassword','termsAcceptedAt','phone','firstName','lastName','lastLoginAt','fcmTokens']) )
+        || ( isAdmin(resource.data.schoolId)
+             && request.resource.data.schoolId == resource.data.schoolId
+             && request.resource.data.get('isPlatformAdmin', false) == resource.data.get('isPlatformAdmin', false) )
+      );
+      allow delete: if false;
+    }
+
+    // ---------- tenant registry ----------
+    match /schoolCodes/{code} {
+      allow read: if true;
+      allow create: if signedIn() && !exists(/databases/$(database)/documents/schoolCodes/$(code))
+        && getAfter(sch(request.resource.data.schoolId)).data.ownerUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /schools/{sid} {
+      allow read: if inSchool(sid) || isPlatform();
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid
+        && !exists(userPath());
+      allow update: if isPlatform()
+        || ( inSchool(sid) && hasRole('school_admin')
+             && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status','ownerUid','code']) );
+      allow delete: if false;
+    }
+
+    // ---------- school configuration (read: anyone in school, write: admin/exam officer) ----------
+    match /schools/{sid}/{col}/{docId} {
+      allow read: if inSchool(sid) && col in ['sessions','terms','levels','arms','subjects','gradingSchemes',
+        'assessmentStructures','traits','allocations','classTeachers','settings'];
+      allow write: if isAdmin(sid) && col in ['sessions','terms','levels','arms','subjects','gradingSchemes',
+        'assessmentStructures','traits','allocations','classTeachers','settings'];
+    }
+
+    // ---------- students ----------
+    match /schools/{sid}/students/{stid} {
+      allow read: if isStaff(sid) || ( inSchool(sid) && (
+          request.auth.uid in resource.data.get('guardianUids', [])
+          || resource.data.get('userId', '') == request.auth.uid ) );
+      allow write: if isAdmin(sid);
+    }
+
+    // ---------- result sheets ----------
+    match /schools/{sid}/sheets/{sheetId} {
+      allow read: if isStaff(sid);
+      allow create: if isAdmin(sid) || ( inSchool(sid) && hasRole('teacher')
+        && request.resource.data.teacherUid == request.auth.uid
+        && get(/databases/$(database)/documents/schools/$(sid)/allocations/$(request.resource.data.termId + '_' + request.resource.data.armId + '_' + request.resource.data.subjectId)).data.teacherUid == request.auth.uid );
+      allow update: if isAdmin(sid)
+        || ( inSchool(sid) && hasRole('teacher') && resource.data.teacherUid == request.auth.uid
+             && resource.data.status in ['DRAFT','RETURNED']
+             && (request.resource.data.status == resource.data.status || request.resource.data.status == 'SUBMITTED') )
+        || ( isReviewer(sid) && resource.data.status in ['SUBMITTED','UNDER_REVIEW']
+             && request.resource.data.status in ['UNDER_REVIEW','APPROVED','RETURNED'] );
+      allow delete: if false;
+
+      match /rows/{rid} {
+        allow read: if isStaff(sid);
+        allow write: if ( isAdmin(sid) && getAfter(/databases/$(database)/documents/schools/$(sid)/sheets/$(sheetId)).data.status != 'LOCKED' )
+          || ( inSchool(sid) && hasRole('teacher')
+               && getAfter(/databases/$(database)/documents/schools/$(sid)/sheets/$(sheetId)).data.teacherUid == request.auth.uid
+               && getAfter(/databases/$(database)/documents/schools/$(sid)/sheets/$(sheetId)).data.status in ['DRAFT','RETURNED'] );
+      }
+      match /events/{eid} {
+        allow read: if isStaff(sid);
+        allow create: if isStaff(sid) && request.resource.data.actorUid == request.auth.uid;
+      }
+      match /comments/{cid} {
+        allow read: if isStaff(sid);
+        allow create, update: if isStaff(sid);
+      }
+    }
+
+    // ---------- report cards (one per student per term) ----------
+    match /schools/{sid}/reports/{rid} {
+      allow read: if isStaff(sid) || ( inSchool(sid) && resource.data.get('published', false) == true && (
+          request.auth.uid in resource.data.get('guardianUids', [])
+          || resource.data.get('studentUserId', '') == request.auth.uid ) );
+      allow create: if isAdmin(sid) || isReviewer(sid) || ( inSchool(sid) && hasRole('teacher')
+        && exists(/databases/$(database)/documents/schools/$(sid)/classTeachers/$(request.resource.data.sessionId + '_' + request.resource.data.armId))
+        && get(/databases/$(database)/documents/schools/$(sid)/classTeachers/$(request.resource.data.sessionId + '_' + request.resource.data.armId)).data.teacherUid == request.auth.uid );
+      allow update: if isAdmin(sid) || ( resource.data.get('published', false) == false && (
+        isReviewer(sid) || ( inSchool(sid) && hasRole('teacher')
+          && exists(/databases/$(database)/documents/schools/$(sid)/classTeachers/$(resource.data.sessionId + '_' + resource.data.armId))
+          && get(/databases/$(database)/documents/schools/$(sid)/classTeachers/$(resource.data.sessionId + '_' + resource.data.armId)).data.teacherUid == request.auth.uid ) ) );
+      allow delete: if isAdmin(sid);
+    }
+
+    // ---------- publishing ----------
+    match /schools/{sid}/publishBatches/{bid} {
+      allow read, write: if isAdmin(sid);
+    }
+
+    // ---------- parent queries ----------
+    match /schools/{sid}/queries/{qid} {
+      allow read: if isAdmin(sid) || ( inSchool(sid) && resource.data.raisedByUid == request.auth.uid );
+      allow create: if inSchool(sid) && request.resource.data.raisedByUid == request.auth.uid;
+      allow update: if isAdmin(sid);
+      match /messages/{mid} {
+        allow read: if isAdmin(sid) || ( inSchool(sid)
+          && get(/databases/$(database)/documents/schools/$(sid)/queries/$(qid)).data.raisedByUid == request.auth.uid );
+        allow create: if request.resource.data.authorUid == request.auth.uid && ( isAdmin(sid) || ( inSchool(sid)
+          && getAfter(/databases/$(database)/documents/schools/$(sid)/queries/$(qid)).data.raisedByUid == request.auth.uid ) );
+      }
+    }
+
+    // ---------- unlock requests ----------
+    match /schools/{sid}/unlockRequests/{uid2} {
+      allow read: if isAdmin(sid) || isReviewer(sid) || ( inSchool(sid) && resource.data.requestedByUid == request.auth.uid );
+      allow create: if isStaff(sid) && request.resource.data.requestedByUid == request.auth.uid;
+      allow update: if isAdmin(sid) || isReviewer(sid);
+    }
+
+    // ---------- notifications ----------
+    match /schools/{sid}/notifications/{nid} {
+      allow read: if inSchool(sid) && resource.data.toUid == request.auth.uid;
+      allow create: if inSchool(sid) && request.resource.data.fromUid == request.auth.uid;
+      allow update, delete: if inSchool(sid) && resource.data.toUid == request.auth.uid;
+    }
+
+    // ---------- audit log: append-only ----------
+    match /schools/{sid}/auditLogs/{aid} {
+      allow read: if isAdmin(sid);
+      allow create: if inSchool(sid) && request.resource.data.actorUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---------- public report-card verification (QR) ----------
+    match /verifications/{code} {
+      allow read: if true;
+      allow create, update: if signedIn() && isAdmin(request.resource.data.schoolId);
+      allow delete: if signedIn() && isAdmin(resource.data.schoolId);
+    }
+
+    // ---------- platform (super admin) ----------
+    match /plans/{id} {
+      allow read: if signedIn();
+      allow write: if isPlatform();
+    }
+    match /featureFlags/{id} {
+      allow read: if signedIn();
+      allow write: if isPlatform();
+    }
+  }
+}

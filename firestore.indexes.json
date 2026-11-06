@@ -1,0 +1,18 @@
+{
+  "indexes": [
+    { "collectionGroup": "users", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "schoolId", "order": "ASCENDING" },
+      { "fieldPath": "roles", "arrayConfig": "CONTAINS" } ] },
+    { "collectionGroup": "reports", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "guardianUids", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "published", "order": "ASCENDING" } ] },
+    { "collectionGroup": "reports", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "guardianUids", "arrayConfig": "CONTAINS" },
+      { "fieldPath": "published", "order": "ASCENDING" },
+      { "fieldPath": "studentId", "order": "ASCENDING" } ] },
+    { "collectionGroup": "reports", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "studentUserId", "order": "ASCENDING" },
+      { "fieldPath": "published", "order": "ASCENDING" } ] }
+  ],
+  "fieldOverrides": []
+}
